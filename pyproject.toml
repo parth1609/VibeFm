@@ -1,0 +1,14 @@
+[project]
+name = "vibefm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]>=0.136.1",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.3",
+    "rich>=15.0.0",
+    "uvicorn>=0.46.0",
+    "yt-dlp>=2026.3.17",
+]
