@@ -149,25 +149,35 @@ async def get_next_song(request: Request) -> NextSongResponse:
             detail="No playlist loaded. Call POST /playlist/load first.",
         )
 
-    _queue_index += 1
-    if _queue_index >= len(_session_queue):
-        logger.info("🔄 Queue exhausted! Rebuilding with aggressively refreshed weights...")
-        _session_queue = build_radio_queue(_session_songs, queue_size=10)
-        _queue_index = 0
-        logger.info(f"🔄 Queue rebuilt with {len(_session_queue)} songs")
+    # Try up to 5 songs to find one that works
+    max_attempts = 5
+    attempts = 0
+    
+    while attempts < max_attempts:
+        _queue_index += 1
+        if _queue_index >= len(_session_queue):
+            logger.info("🔄 Queue exhausted! Rebuilding with aggressively refreshed weights...")
+            _session_queue = build_radio_queue(_session_songs, queue_size=10)
+            _queue_index = 0
+            logger.info(f"🔄 Queue rebuilt with {len(_session_queue)} songs")
 
-    song = _session_queue[_queue_index]
-    logger.info(f"🎵 Selected song: '{song.title}' (ID: {song.video_id}) at position {_queue_index}")
+        song = _session_queue[_queue_index]
+        logger.info(f"🎵 Selected song: '{song.title}' (ID: {song.video_id}) at position {_queue_index}")
 
-    try:
-        logger.info(f"🔗 Resolving audio stream URL via yt-dlp for {song.video_id}...")
-        stream = await resolve_audio_stream(song.video_id)
-        logger.info(f"✅ Stream resolved successfully! Format: {stream.ext}, Size: {stream.filesize_bytes if hasattr(stream, 'filesize_bytes') else 'unknown'}")
-        logger.debug(f"🎧 Stream URL: {stream.stream_url[:100]}...")
-    except Exception as exc:
-        logger.error(f"❌ yt-dlp failed to extract stream format: {exc}")
-        logger.exception(f"Stream resolution failure details: {exc}")
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        try:
+            logger.info(f"🔗 Resolving audio stream URL via yt-dlp for {song.video_id}...")
+            stream = await resolve_audio_stream(song.video_id)
+            logger.info(f"✅ Stream resolved successfully! Format: {stream.ext}, Size: {stream.filesize_bytes if hasattr(stream, 'filesize_bytes') else 'unknown'}")
+            logger.debug(f"🎧 Stream URL: {stream.stream_url[:100]}...")
+            break  # Success! Exit the retry loop
+        except Exception as exc:
+            logger.warning(f"⚠️ Failed to resolve stream for {song.video_id}: {exc}")
+            attempts += 1
+            if attempts >= max_attempts:
+                logger.error(f"❌ Failed to resolve audio stream after {max_attempts} attempts")
+                raise HTTPException(status_code=502, detail=f"Unable to find playable audio after {max_attempts} attempts. Last error: {exc}") from exc
+            logger.info(f"🔄 Trying next song (attempt {attempts + 1}/{max_attempts})")
+            continue
 
     song.audio_stream_url = stream.stream_url
     song.mark_played()

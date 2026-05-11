@@ -35,10 +35,54 @@ _STREAM_OPTS: dict[str, Any] = {
     "no_warnings": True,
     "skip_download": True,
     "format": (
-        # Prefer: opus/webm audio-only, then best audio-only, then fallback
-        "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best"
+        # Prefer: m4a (better browser support), then webm, then fallback
+        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
     ),
     "ignoreerrors": True,
+    # Add comprehensive browser-like headers to bypass YouTube bot detection
+    "http_headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    },
+    "noplaylist": True,  # Prevent playlist extraction to avoid bot detection
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"],
+        }
+    },
+}
+
+# Invidious instances for fallback when YouTube direct extraction fails
+_INVIDIOUS_INSTANCES = [
+    "https://yewtu.be",
+    "https://invidious.snopyta.org", 
+    "https://yewtu.be",
+    "https://vid.puffyan.us",
+]
+
+# Fallback options for Invidious instances
+_INVIDIOUS_OPTS: dict[str, Any] = {
+    "quiet": True,
+    "no_warnings": True,
+    "skip_download": True,
+    "format": "bestaudio/best",
+    "ignoreerrors": True,
+    "http_headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
 }
 
 
@@ -147,12 +191,36 @@ def _sync_fetch_playlist(playlist_url: str) -> list[Song]:
 
 def _sync_resolve_stream(url: str) -> AudioStreamInfo:
     """Blocking yt-dlp call — must be run in an executor."""
-    with yt_dlp.YoutubeDL(_STREAM_OPTS) as ydl:
-        info = ydl.extract_info(url, download=False)
+    # Try YouTube first
+    try:
+        with yt_dlp.YoutubeDL(_STREAM_OPTS) as ydl:
+            info = ydl.extract_info(url, download=False)
+        
+        if info and info.get("url"):
+            return _create_stream_info(info)
+    except Exception as e:
+        logger.warning(f"YouTube direct extraction failed: {e}")
+    
+    # Fallback to Invidious instances
+    video_id = url.split("v=")[-1].split("&")[0]
+    for instance in _INVIDIOUS_INSTANCES:
+        try:
+            invidious_url = f"{instance}/watch?v={video_id}"
+            with yt_dlp.YoutubeDL(_INVIDIOUS_OPTS) as ydl:
+                info = ydl.extract_info(invidious_url, download=False)
+            
+            if info and info.get("url"):
+                logger.info(f"Successfully used Invidious fallback: {instance}")
+                return _create_stream_info(info)
+        except Exception as e:
+            logger.debug(f"Invidious instance {instance} failed: {e}")
+            continue
+    
+    raise RuntimeError(f"Could not extract audio stream URL for: {url} (tried YouTube + Invidious fallbacks)")
 
-    if info is None:
-        raise RuntimeError(f"yt-dlp returned no stream info for: {url}")
 
+def _create_stream_info(info: dict) -> AudioStreamInfo:
+    """Create AudioStreamInfo from yt-dlp info dict."""
     # When format selection produces a single format, the stream URL is in
     # info["url"]; for merged formats it would be in info["requested_formats"].
     stream_url = info.get("url")
@@ -165,7 +233,7 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
                 break
 
     if not stream_url:
-        raise RuntimeError(f"Could not extract audio stream URL for: {url}")
+        raise RuntimeError(f"Could not extract audio stream URL from info: {info.get('id', 'unknown')}")
 
     return AudioStreamInfo(
         video_id=info.get("id", ""),

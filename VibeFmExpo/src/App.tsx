@@ -1,0 +1,55 @@
+import React from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { createStackNavigator } from '@react-navigation/stack';
+import PlaylistScreen from './screens/PlaylistScreen';
+import PlayerScreen from './screens/PlayerScreen';
+import QueueScreen from './screens/QueueScreen';
+import { LoadPlaylistResponse } from './types';
+
+const Stack = createStackNavigator();
+
+type RootStackParamList = {
+  Playlist: undefined;
+  Player: { playlist: LoadPlaylistResponse };
+  Queue: undefined;
+};
+
+const App: React.FC = () => {
+  return (
+    <NavigationContainer>
+      <Stack.Navigator
+        initialRouteName="Playlist"
+        screenOptions={{
+          headerShown: false,
+          cardStyle: { backgroundColor: '#1a1a1a' },
+        }}
+      >
+        <Stack.Screen 
+          name="Playlist" 
+          component={PlaylistScreen}
+          options={{
+            gestureEnabled: false,
+          }}
+        />
+        <Stack.Screen 
+          name="Player" 
+          component={PlayerScreen}
+          options={{
+            gestureEnabled: true,
+            presentation: 'modal',
+          }}
+        />
+        <Stack.Screen 
+          name="Queue" 
+          component={QueueScreen}
+          options={{
+            gestureEnabled: true,
+            presentation: 'modal',
+          }}
+        />
+      </Stack.Navigator>
+    </NavigationContainer>
+  );
+};
+
+export default App;
