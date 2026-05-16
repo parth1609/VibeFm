@@ -1,15 +1,17 @@
-import { 
-  Song, 
-  AudioStreamInfo, 
-  LoadPlaylistRequest, 
-  LoadPlaylistResponse, 
-  NextSongResponse 
+import {
+  Song,
+  AudioStreamInfo,
+  LoadPlaylistRequest,
+  LoadPlaylistResponse,
+  NextSongResponse
 } from '../types';
 
 // React Native has fetch globally available
 declare const fetch: any;
 
-const API_BASE_URL = 'http://10.58.179.231:8000'; // Update this to your backend URL
+const API_BASE_URL = __DEV__
+  ? 'http://10.12.139.231:8000'
+  : 'https://your-production-backend-url.com'; // Update this to your production backend URL
 
 class ApiService {
   private baseUrl: string;
@@ -24,7 +26,7 @@ class ApiService {
     options: any = {}
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
-    
+
     const defaultHeaders = {
       'Content-Type': 'application/json',
     };
@@ -39,7 +41,7 @@ class ApiService {
 
     try {
       const response = await fetch(url, config);
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`API Error: ${response.status} - ${errorText}`);

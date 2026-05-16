@@ -88,3 +88,7 @@ app.include_router(rj_router)
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "Welcome to VibeFm Radio API"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.app:app", host="0.0.0.0", port=8000, reload=True)

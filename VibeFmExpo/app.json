@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "VibeFmExpo",
-    "slug": "VibeFmExpo",
+    "slug": "vibefm",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -9,7 +9,8 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "n"
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +20,8 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.parthpatilsorganization.vibefm"
     },
     "web": {
       "output": "single",
@@ -42,6 +44,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "d8b89890-d1d3-459a-b47f-5e4aba365944"
+      }
+    },
+    "owner": "parthpatils-organization"
   }
 }
