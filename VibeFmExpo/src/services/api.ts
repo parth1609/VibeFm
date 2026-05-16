@@ -11,7 +11,7 @@ declare const fetch: any;
 
 const API_BASE_URL = __DEV__
   ? 'http://10.12.139.231:8000'
-  : 'https://your-production-backend-url.com'; // Update this to your production backend URL
+  : 'hhttps://vibefm.onrender.com'; // Update this to your production backend URL
 
 class ApiService {
   private baseUrl: string;
