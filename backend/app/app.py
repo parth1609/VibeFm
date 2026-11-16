@@ -1,8 +1,12 @@
+import mimetypes
 import time
 import logging
+from pathlib import Path
+
 from starlette.types import ASGIApp, Receive, Scope, Send
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from .modules.playlist.router import router as playlist_router
 from .modules.rj.router import router as rj_router
 from .core.logger import setup_logging
@@ -14,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="VibeFm API",
     description="AI Personal Radio Station Backend API",
-    version="1.1.1"
+    version="1.2.0"
 )
 
 # CORS — allow the Flutter app to call the backend from any origin (dev mode)
@@ -85,9 +89,46 @@ logger.info("🚀 VibeFm application successfully loaded into memory!")
 app.include_router(playlist_router)
 app.include_router(rj_router)
 
-@app.get("/")
-def read_root():
-    return {"status": "ok", "message": "Welcome to VibeFm Radio API"}
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": app.version}
+
+
+# ---------------------------------------------------------------------------
+# Web app (Expo web export)
+#
+# Serving the exported bundle from the API means opening the deployed URL shows
+# the radio itself instead of raw JSON. Everything stays on one origin, so the
+# browser app talks to /playlist/* without CORS games.
+#
+# Rebuild the bundle after UI changes:
+#   cd VibeFmExpo && npx expo export --platform web --output-dir ../web
+# ---------------------------------------------------------------------------
+
+# Explicit types so fonts/bundles are served correctly on every host platform
+# (some mimetype tables do not know .ttf/.woff and fall back to text/plain).
+for _suffix, _type in (
+    (".ttf", "font/ttf"),
+    (".otf", "font/otf"),
+    (".woff", "font/woff"),
+    (".woff2", "font/woff2"),
+    (".js", "application/javascript"),
+    (".webp", "image/webp"),
+    (".ico", "image/x-icon"),
+):
+    mimetypes.add_type(_type, _suffix)
+
+_WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+
+if _WEB_DIR.is_dir():
+    # Mounted last, so /playlist/*, /docs and /health still win.
+    app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")
+    logger.info("🌐 Serving web app from %s", _WEB_DIR)
+else:
+
+    @app.get("/")
+    def read_root():
+        return {"status": "ok", "message": "Welcome to VibeFm Radio API"}
 
 if __name__ == "__main__":
     import uvicorn

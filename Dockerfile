@@ -19,6 +19,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the backend code into the container
 COPY backend ./backend
 
+# Prebuilt Expo web app, served by FastAPI at /
+# (rebuild: cd VibeFmExpo && npx expo export --platform web --output-dir ../web)
+COPY web ./web
+
 # Change working directory to where the app code lives
 WORKDIR /app/backend
 
