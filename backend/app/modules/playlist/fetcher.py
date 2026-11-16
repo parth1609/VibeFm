@@ -7,11 +7,16 @@ from YouTube using yt-dlp without any video rendering.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import os
 import re
+import tempfile
 import time
+from functools import lru_cache
 from typing import Any
 
+import httpx
 import yt_dlp
 
 from .models import AudioStreamInfo, Song
@@ -31,15 +36,15 @@ _METADATA_OPTS: dict[str, Any] = {
     "ignoreerrors": True,             # skip geo-blocked / deleted videos gracefully
 }
 
-# Used when resolving a single video's best audio stream URL
+# Used when resolving a single video's best audio stream URL.
+# The player client list is injected per attempt (see _CLIENT_STRATEGIES).
 _STREAM_OPTS: dict[str, Any] = {
     "quiet": True,
     "no_warnings": True,
     "skip_download": True,
-    "format": (
-        # Prefer: m4a (better browser support), then webm, then fallback
-        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
-    ),
+    # Prefer true audio-only streams: AAC/m4a first (widest device support),
+    # then any bestaudio, and only fall back to a muxed stream if none exist.
+    "format": "bestaudio[acodec^=mp4a]/bestaudio/best",
     # Surface real errors instead of silently returning an empty result.
     "ignoreerrors": False,
     # NOTE: do not override http_headers here. yt-dlp negotiates its own request
@@ -51,20 +56,36 @@ _STREAM_OPTS: dict[str, Any] = {
     "socket_timeout": 15,
     "retries": 1,
     "extractor_retries": 1,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "web"],
-        }
-    },
 }
 
-# Invidious instances for fallback when YouTube direct extraction fails
+# YouTube decides what it will hand out based on the client identity *and* the
+# requesting IP. Cloud hosts (Render, Fly, ...) are handled far more strictly
+# than a home connection, so try progressively simpler clients until one returns
+# a URL that really serves bytes.
+_CLIENT_STRATEGIES: tuple[tuple[str, ...], ...] = (
+    ("android_vr", "android", "web"),
+    ("tv", "web_safari"),
+    ("mweb", "ios"),
+    ("web",),
+)
+
+# Give up on one video after this long so a dead track cannot stall the station.
+_RESOLVE_BUDGET_S = 25.0
+_PROBE_TIMEOUT_S = 12.0
+
+# Invidious instances used as a last resort. Their API hands back stream URLs
+# proxied by the instance (``local=true``), so they work even when YouTube
+# refuses to talk to our IP directly.
 _INVIDIOUS_INSTANCES = [
     "https://yewtu.be",
     "https://inv.nadeko.net",
 ]
 
-# Fallback options for Invidious instances
+_INVIDIOUS_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
 # ---------------------------------------------------------------------------
 # Stream URL cache
 #
@@ -85,14 +106,7 @@ _prefetch_tasks: set["asyncio.Task[None]"] = set()
 # response", which is the very failure that made tracks unplayable.
 _EXTRACT_LIMITER = asyncio.Semaphore(2)
 
-# Fallback options for Invidious instances
-_INVIDIOUS_OPTS: dict[str, Any] = {
-    "quiet": True,
-    "no_warnings": True,
-    "skip_download": True,
-    "format": "bestaudio/best",
-    "ignoreerrors": False,
-}
+
 
 
 # ---------------------------------------------------------------------------
@@ -274,38 +288,179 @@ def _sync_fetch_playlist(playlist_url: str) -> list[Song]:
     return songs
 
 
-def _sync_resolve_stream(url: str) -> AudioStreamInfo:
-    """Blocking yt-dlp call — must be run in an executor."""
-    # Try YouTube first. Extraction is occasionally flaky ("Failed to extract any
-    # player response"), so give it one retry before using the slower fallback.
-    for attempt in range(2):
-        try:
-            with yt_dlp.YoutubeDL(_STREAM_OPTS) as ydl:
-                info = ydl.extract_info(url, download=False)
-            if info and info.get("url"):
-                return _create_stream_info(info)
-            logger.warning("YouTube returned no stream URL (attempt %d)", attempt + 1)
-        except Exception as e:
-            logger.warning("YouTube direct extraction failed (attempt %d): %s", attempt + 1, e)
-        if attempt == 0:
-            time.sleep(0.8)
+def _stream_opts(clients: tuple[str, ...]) -> dict[str, Any]:
+    """Build yt-dlp options for one extraction attempt."""
+    opts = dict(_STREAM_OPTS)
+    opts["extractor_args"] = {"youtube": {"player_client": list(clients)}}
 
-    # Fallback to Invidious instances
+    cookie_file = _cookie_file()
+    if cookie_file:
+        # A logged-in cookie sidesteps YouTube's datacenter bot check entirely.
+        opts["cookiefile"] = cookie_file
+    proxy = os.environ.get("YTDLP_PROXY")
+    if proxy:
+        opts["proxy"] = proxy
+    return opts
+
+
+@lru_cache(maxsize=1)
+def _cookie_file() -> str | None:
+    """
+    Optional YouTube cookies for hosts YouTube treats as suspicious.
+
+    Render env vars: ``YTDLP_COOKIES_FILE`` (path) or ``YTDLP_COOKIES`` (the
+    netscape cookie file itself, raw or base64). Never committed to the repo.
+    """
+    explicit = os.environ.get("YTDLP_COOKIES_FILE")
+    if explicit and os.path.isfile(explicit):
+        return explicit
+
+    blob = os.environ.get("YTDLP_COOKIES")
+    if not blob:
+        return None
+
+    data = blob.encode("utf-8")
+    try:
+        data = base64.b64decode(blob, validate=True)
+    except Exception:  # noqa: BLE001 - not base64, keep the raw text
+        pass
+
+    path = os.path.join(tempfile.gettempdir(), "vibefm_yt_cookies.txt")
+    try:
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+    except OSError as exc:
+        logger.warning("Could not write cookie file: %s", exc)
+        return None
+
+
+def _sync_resolve_stream(url: str) -> AudioStreamInfo:
+    """
+    Blocking — must be run in an executor.
+
+    Tries each client strategy and only accepts a URL that actually serves
+    bytes. Accepting the first URL yt-dlp returns is not enough: YouTube happily
+    hands back URLs that answer 403 to the request that follows when it does not
+    like the client or the IP it came from.
+    """
     video_id = url.split("v=")[-1].split("&")[0]
+    deadline = time.monotonic() + _RESOLVE_BUDGET_S
+    last_error: object = "no client returned a playable URL"
+
+    for clients in _CLIENT_STRATEGIES:
+        if time.monotonic() >= deadline:
+            logger.warning("Resolution budget exhausted for %s", video_id)
+            break
+
+        try:
+            with yt_dlp.YoutubeDL(_stream_opts(clients)) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if not info:
+                last_error = "null player response"
+                continue
+            candidate = _create_stream_info(info)
+        except Exception as exc:  # noqa: BLE001 - try the next client
+            last_error = exc
+            logger.warning(
+                "Extraction failed for %s with clients %s: %s",
+                video_id,
+                ",".join(clients),
+                exc,
+            )
+            continue
+
+        if _is_playable(candidate):
+            logger.info(
+                "Resolved %s via %s (ext=%s)",
+                video_id,
+                ",".join(clients),
+                candidate.ext,
+            )
+            return candidate
+
+        last_error = "URL answered 403 to playback"
+        logger.warning(
+            "Clients %s gave an unplayable URL for %s", ",".join(clients), video_id
+        )
+
+    logger.info("Falling back to Invidious for %s", video_id)
+    proxied = _invidious_direct(video_id)
+    if proxied is not None:
+        return proxied
+
+    raise RuntimeError(
+        f"Could not extract a playable audio stream for {video_id} "
+        f"(last error: {last_error})"
+    )
+
+
+def _is_playable(info: AudioStreamInfo) -> bool:
+    """Cheaply confirm the resolved URL really streams (first KB only)."""
+    headers = dict(info.http_headers)
+    headers["Range"] = "bytes=0-1023"
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(_PROBE_TIMEOUT_S, read=_PROBE_TIMEOUT_S),
+            follow_redirects=True,
+        ) as client:
+            with client.stream(
+                "GET", info.stream_url, headers=headers
+            ) as response:
+                if response.status_code not in (200, 206):
+                    logger.debug(
+                        "Probe rejected %s: HTTP %s", info.video_id, response.status_code
+                    )
+                    return False
+                next(response.iter_bytes(1024), None)
+                return True
+    except Exception as exc:  # noqa: BLE001 - treat as unusable
+        logger.debug("Probe failed for %s: %s", info.video_id, exc)
+        return False
+
+
+def _invidious_direct(video_id: str) -> AudioStreamInfo | None:
+    """
+    Ask an Invidious instance for the track and play it through its proxy
+    (``local=true``). The instance fetches the bytes, so a blocked IP on our
+    side does not matter.
+    """
+    fields = "adaptiveFormats,formatStreams,title,author,lengthSeconds"
     for instance in _INVIDIOUS_INSTANCES:
         try:
-            invidious_url = f"{instance}/watch?v={video_id}"
-            with yt_dlp.YoutubeDL(_INVIDIOUS_OPTS) as ydl:
-                info = ydl.extract_info(invidious_url, download=False)
-            
-            if info and info.get("url"):
-                logger.info(f"Successfully used Invidious fallback: {instance}")
-                return _create_stream_info(info)
-        except Exception as e:
-            logger.debug(f"Invidious instance {instance} failed: {e}")
+            with httpx.Client(timeout=httpx.Timeout(_PROBE_TIMEOUT_S)) as client:
+                payload = client.get(
+                    f"{instance}/api/v1/videos/{video_id}", params={"fields": fields}
+                ).json()
+        except Exception as exc:  # noqa: BLE001 - try the next instance
+            logger.debug("Invidious %s failed for %s: %s", instance, video_id, exc)
             continue
-    
-    raise RuntimeError(f"Could not extract audio stream URL for: {url} (tried YouTube + Invidious fallbacks)")
+
+        formats = [
+            fmt
+            for fmt in payload.get("adaptiveFormats") or []
+            if str(fmt.get("type", "")).startswith("audio/") and fmt.get("url")
+        ]
+        formats.sort(key=lambda fmt: int(fmt.get("bitrate") or 0), reverse=True)
+
+        for fmt in formats:
+            mime = str(fmt.get("type", ""))
+            url = fmt["url"]
+            candidate = AudioStreamInfo(
+                video_id=video_id,
+                stream_url=f"{url}{'&' if '?' in url else '?'}local=true",
+                ext="m4a" if "mp4" in mime else "webm",
+                abr=(int(fmt.get("bitrate") or 0) / 1000) or None,
+                duration_sec=payload.get("lengthSeconds"),
+                title=payload.get("title", ""),
+                uploader=payload.get("author", ""),
+                http_headers={"User-Agent": _INVIDIOUS_UA},
+            )
+            if _is_playable(candidate):
+                logger.info("Resolved %s via Invidious %s", video_id, instance)
+                return candidate
+
+    return None
 
 
 def _create_stream_info(info: dict) -> AudioStreamInfo:
