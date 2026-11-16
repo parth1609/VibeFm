@@ -47,6 +47,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .fetcher import (
+    BLOCKED_HINT,
+    YouTubeBlockedError,
     cached_stream,
     fetch_playlist_songs,
     invalidate_stream,
@@ -217,6 +219,9 @@ async def get_next_song(request: Request) -> NextSongResponse:
             stream = cached_stream(song.video_id) or await resolve_audio_stream(
                 song.video_id
             )
+        except YouTubeBlockedError as exc:
+            # Every track will fail the same way, so surface it immediately.
+            raise HTTPException(status_code=503, detail=BLOCKED_HINT) from exc
         except Exception as exc:  # noqa: BLE001 - try the next track instead
             last_error = exc
             logger.warning("Skipping %s (%s)", song.video_id, exc)
@@ -402,6 +407,8 @@ def _audio_media_type(content_type: str | None, ext: str) -> str:
 async def _stream_for_playback(video_id: str) -> AudioStreamInfo:
     try:
         return await resolve_audio_stream(video_id)
+    except YouTubeBlockedError as exc:
+        raise HTTPException(status_code=503, detail=BLOCKED_HINT) from exc
     except Exception as exc:  # noqa: BLE001 - map to a clean API error
         logger.exception("Cannot resolve audio stream for %s", video_id)
         raise HTTPException(status_code=502, detail=str(exc)) from exc

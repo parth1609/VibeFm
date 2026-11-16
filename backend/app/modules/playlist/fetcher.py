@@ -66,25 +66,50 @@ _CLIENT_STRATEGIES: tuple[tuple[str, ...], ...] = (
     ("android_vr", "android", "web"),
     ("tv", "web_safari"),
     ("mweb", "ios"),
-    ("web",),
 )
 
 # Give up on one video after this long so a dead track cannot stall the station.
-_RESOLVE_BUDGET_S = 25.0
+_RESOLVE_BUDGET_S = 12.0
 _PROBE_TIMEOUT_S = 12.0
 
-# Invidious instances used as a last resort. Their API hands back stream URLs
-# proxied by the instance (``local=true``), so they work even when YouTube
-# refuses to talk to our IP directly.
-_INVIDIOUS_INSTANCES = [
-    "https://yewtu.be",
-    "https://inv.nadeko.net",
-]
+# YouTube answers datacenter IPs with "Sign in to confirm you're not a bot".
+# Every following request from the same host gets the same answer, so remember
+# it briefly and fail fast instead of re-probing every track.
+_BLOCKED_TTL_S = 15 * 60
+_blocked_until: float = 0.0
 
-_INVIDIOUS_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+_BLOCKED_MARKERS = (
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "confirm you’re not a bot",
+    "please sign in",
 )
+
+BLOCKED_HINT = (
+    "YouTube is refusing to stream to this server's IP (datacenter block). "
+    "Set the YTDLP_COOKIES environment variable on the backend host with a "
+    "YouTube cookie file (raw or base64), or run the backend on a home "
+    "connection. Playlists still load; audio needs this step."
+)
+
+
+class YouTubeBlockedError(RuntimeError):
+    """YouTube will not hand out streams to this host without credentials."""
+
+
+def youtube_blocked() -> bool:
+    """True while this host is known to be blocked by YouTube."""
+    return time.monotonic() < _blocked_until
+
+
+def _mark_blocked() -> None:
+    global _blocked_until
+    _blocked_until = time.monotonic() + _BLOCKED_TTL_S
+
+
+def _looks_blocked(message: object) -> bool:
+    text = str(message).lower()
+    return any(marker in text for marker in _BLOCKED_MARKERS)
 
 # ---------------------------------------------------------------------------
 # Stream URL cache
@@ -165,6 +190,10 @@ async def resolve_audio_stream(
         hit = cached_stream(video_id)
         if hit is not None:
             return hit
+
+    # Known-blocked host without cookies: don't burn 10s per track to re-learn it.
+    if youtube_blocked() and _cookie_file() is None:
+        raise YouTubeBlockedError(BLOCKED_HINT)
 
     task = _resolve_inflight.get(video_id)
     if task is None:
@@ -348,6 +377,9 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
     deadline = time.monotonic() + _RESOLVE_BUDGET_S
     last_error: object = "no client returned a playable URL"
 
+    if youtube_blocked() and _cookie_file() is None:
+        raise YouTubeBlockedError(BLOCKED_HINT)
+
     for clients in _CLIENT_STRATEGIES:
         if time.monotonic() >= deadline:
             logger.warning("Resolution budget exhausted for %s", video_id)
@@ -368,6 +400,9 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
                 ",".join(clients),
                 exc,
             )
+            if _looks_blocked(exc):
+                # The IP itself is the problem; other clients won't help.
+                break
             continue
 
         if _is_playable(candidate):
@@ -384,10 +419,9 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
             "Clients %s gave an unplayable URL for %s", ",".join(clients), video_id
         )
 
-    logger.info("Falling back to Invidious for %s", video_id)
-    proxied = _invidious_direct(video_id)
-    if proxied is not None:
-        return proxied
+    if _looks_blocked(last_error) and _cookie_file() is None:
+        _mark_blocked()
+        raise YouTubeBlockedError(BLOCKED_HINT)
 
     raise RuntimeError(
         f"Could not extract a playable audio stream for {video_id} "
@@ -418,49 +452,6 @@ def _is_playable(info: AudioStreamInfo) -> bool:
         logger.debug("Probe failed for %s: %s", info.video_id, exc)
         return False
 
-
-def _invidious_direct(video_id: str) -> AudioStreamInfo | None:
-    """
-    Ask an Invidious instance for the track and play it through its proxy
-    (``local=true``). The instance fetches the bytes, so a blocked IP on our
-    side does not matter.
-    """
-    fields = "adaptiveFormats,formatStreams,title,author,lengthSeconds"
-    for instance in _INVIDIOUS_INSTANCES:
-        try:
-            with httpx.Client(timeout=httpx.Timeout(_PROBE_TIMEOUT_S)) as client:
-                payload = client.get(
-                    f"{instance}/api/v1/videos/{video_id}", params={"fields": fields}
-                ).json()
-        except Exception as exc:  # noqa: BLE001 - try the next instance
-            logger.debug("Invidious %s failed for %s: %s", instance, video_id, exc)
-            continue
-
-        formats = [
-            fmt
-            for fmt in payload.get("adaptiveFormats") or []
-            if str(fmt.get("type", "")).startswith("audio/") and fmt.get("url")
-        ]
-        formats.sort(key=lambda fmt: int(fmt.get("bitrate") or 0), reverse=True)
-
-        for fmt in formats:
-            mime = str(fmt.get("type", ""))
-            url = fmt["url"]
-            candidate = AudioStreamInfo(
-                video_id=video_id,
-                stream_url=f"{url}{'&' if '?' in url else '?'}local=true",
-                ext="m4a" if "mp4" in mime else "webm",
-                abr=(int(fmt.get("bitrate") or 0) / 1000) or None,
-                duration_sec=payload.get("lengthSeconds"),
-                title=payload.get("title", ""),
-                uploader=payload.get("author", ""),
-                http_headers={"User-Agent": _INVIDIOUS_UA},
-            )
-            if _is_playable(candidate):
-                logger.info("Resolved %s via Invidious %s", video_id, instance)
-                return candidate
-
-    return None
 
 
 def _create_stream_info(info: dict) -> AudioStreamInfo:
