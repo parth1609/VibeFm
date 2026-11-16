@@ -1,19 +1,22 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  Alert,
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StackNavigationProp } from '@react-navigation/stack';
 import { apiService } from '../services/api';
 import { LoadPlaylistResponse } from '../types';
-import { StackNavigationProp } from '@react-navigation/stack';
+import { colors, borderRadius } from '../styles/colors';
 
 type RootStackParamList = {
   Playlist: undefined;
@@ -27,257 +30,398 @@ interface Props {
   navigation: PlaylistScreenNavigationProp;
 }
 
+const LOADING_HINTS = [
+  'Reading the playlist…',
+  'Shuffling the deck…',
+  'Tuning the antenna…',
+];
+
 const PlaylistScreen: React.FC<Props> = ({ navigation }) => {
+  const insets = useSafeAreaInsets();
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [loading, setLoading] = useState(false);
-  const [playlistData, setPlaylistData] = useState<LoadPlaylistResponse | null>(null);
+  const [hintIndex, setHintIndex] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [station, setStation] = useState<LoadPlaylistResponse | null>(null);
+
+  useEffect(() => {
+    if (!loading) {
+      setHintIndex(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setHintIndex((current) => (current + 1) % LOADING_HINTS.length);
+    }, 2200);
+    return () => clearInterval(interval);
+  }, [loading]);
 
   const handleLoadPlaylist = async () => {
-    if (!playlistUrl.trim()) {
-      Alert.alert('Error', 'Please enter a YouTube playlist URL');
+    const url = playlistUrl.trim();
+
+    if (!url) {
+      setError('Paste a YouTube playlist link to start your station.');
+      return;
+    }
+    if (!/(youtube\.com|youtu\.be)/i.test(url)) {
+      setError("That doesn't look like a YouTube playlist link.");
       return;
     }
 
+    Keyboard.dismiss();
+    setError(null);
     setLoading(true);
+
     try {
-      const response = await apiService.loadPlaylist({
-        url: playlistUrl.trim(),
-        queue_size: 10,
-      });
-      
-      setPlaylistData(response);
-      Alert.alert(
-        'Success',
-        `Loaded ${response.total_songs} songs from playlist!`,
-        [
-          {
-            text: 'View Queue',
-            onPress: () => navigation.navigate('Queue'),
-          },
-          {
-            text: 'Start Playing',
-            onPress: () => navigation.navigate('Player', { playlist: response }),
-          },
-          {
-            text: 'OK',
-            style: 'cancel',
-          },
-        ]
+      const response = await apiService.loadPlaylist({ url, queue_size: 12 });
+
+      if (!response.queue?.length) {
+        throw new Error('That playlist has no playable songs.');
+      }
+
+      setStation(response);
+      // Tune in right away — the first random track starts loading immediately.
+      navigation.navigate('Player', { playlist: response });
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Could not load that playlist.'
       );
-    } catch (error) {
-      Alert.alert('Error', error instanceof Error ? error.message : 'Failed to load playlist');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleStartPlaying = () => {
-    if (playlistData) {
-      navigation.navigate('Player', { playlist: playlistData });
-    }
-  };
-
-  const handleViewQueue = () => {
-    navigation.navigate('Queue');
-  };
-
   return (
-    <KeyboardAvoidingView 
-      style={styles.container} 
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView contentContainerStyle={styles.scrollContainer}>
-        <View style={styles.header}>
-          <Text style={styles.title}>VibeFM</Text>
-          <Text style={styles.subtitle}>AI Personal Radio Station</Text>
-        </View>
-
-        <View style={styles.inputSection}>
-          <Text style={styles.label}>YouTube Playlist URL</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="https://www.youtube.com/playlist?list=..."
-            value={playlistUrl}
-            onChangeText={setPlaylistUrl}
-            multiline={true}
-            numberOfLines={3}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-        </View>
-
-        <TouchableOpacity
-          style={[styles.button, loading && styles.buttonDisabled]}
-          onPress={handleLoadPlaylist}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="#ffffff" size="small" />
-          ) : (
-            <Text style={styles.buttonText}>Load Playlist</Text>
-          )}
-        </TouchableOpacity>
-
-        {playlistData && (
-          <View style={styles.playlistInfo}>
-            <Text style={styles.infoTitle}>Playlist Loaded!</Text>
-            <Text style={styles.infoText}>
-              Total Songs: {playlistData.total_songs}
-            </Text>
-            <Text style={styles.infoText}>
-              Queue Size: {playlistData.queue.length}
-            </Text>
-            
-            <View style={styles.actionButtons}>
-              <TouchableOpacity
-                style={[styles.secondaryButton, styles.actionButton]}
-                onPress={handleViewQueue}
-              >
-                <Text style={styles.secondaryButtonText}>View Queue</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity
-                style={[styles.primaryButton, styles.actionButton]}
-                onPress={handleStartPlaying}
-              >
-                <Text style={styles.primaryButtonText}>Start Playing</Text>
-              </TouchableOpacity>
-            </View>
+      <ScrollView
+        contentContainerStyle={[
+          styles.scrollContainer,
+          { paddingTop: insets.top + 32, paddingBottom: insets.bottom + 24 },
+        ]}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Brand */}
+        <View style={styles.brand}>
+          <View style={styles.logoMark}>
+            <MaterialIcons name="graphic-eq" size={26} color={colors.text} />
           </View>
-        )}
-
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            Enter a YouTube playlist URL to start your personalized radio experience
+          <Text style={styles.wordmark}>
+            VIBE<Text style={styles.wordmarkAccent}>FM</Text>
           </Text>
+          <Text style={styles.tagline}>
+            Your playlist, played like radio. Random order, zero decisions.
+          </Text>
+        </View>
+
+        {/* Input card */}
+        <View style={styles.card}>
+          <Text style={styles.label}>PLAYLIST LINK</Text>
+
+          <View style={styles.inputRow}>
+            <MaterialIcons name="link" size={18} color={colors.textTertiary} />
+            <TextInput
+              style={styles.input}
+              placeholder="https://youtube.com/playlist?list=…"
+              placeholderTextColor={colors.textTertiary}
+              value={playlistUrl}
+              onChangeText={(text) => {
+                setPlaylistUrl(text);
+                if (error) setError(null);
+              }}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="go"
+              onSubmitEditing={() => void handleLoadPlaylist()}
+              editable={!loading}
+            />
+            {playlistUrl.length > 0 && !loading ? (
+              <Pressable hitSlop={10} onPress={() => setPlaylistUrl('')}>
+                <MaterialIcons name="close" size={18} color={colors.textTertiary} />
+              </Pressable>
+            ) : null}
+          </View>
+
+          {error ? (
+            <View style={styles.errorRow}>
+              <MaterialIcons name="error-outline" size={15} color={colors.error} />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
+          <Pressable
+            onPress={() => void handleLoadPlaylist()}
+            disabled={loading}
+            style={({ pressed }) => [
+              styles.tuneButton,
+              loading && styles.tuneButtonDisabled,
+              pressed && !loading && styles.tuneButtonPressed,
+            ]}
+          >
+            {loading ? (
+              <>
+                <ActivityIndicator color={colors.text} size="small" />
+                <Text style={styles.tuneButtonText}>{LOADING_HINTS[hintIndex]}</Text>
+              </>
+            ) : (
+              <>
+                <MaterialIcons name="play-circle-filled" size={22} color={colors.text} />
+                <Text style={styles.tuneButtonText}>Tune in</Text>
+              </>
+            )}
+          </Pressable>
+
+          <Text style={styles.cardHint}>
+            Works with any public YouTube playlist. Audio only — nothing is
+            downloaded.
+          </Text>
+        </View>
+
+        {/* Current station */}
+        {station ? (
+          <Pressable
+            style={({ pressed }) => [styles.stationCard, pressed && styles.pressed]}
+            onPress={() => navigation.navigate('Player', { playlist: station })}
+          >
+            <View style={styles.stationDot} />
+            <View style={styles.stationText}>
+              <Text style={styles.stationLabel}>STATION LOADED</Text>
+              <Text style={styles.stationMeta}>
+                {station.total_songs} songs · {station.queue.length} in rotation
+              </Text>
+            </View>
+            <MaterialIcons
+              name="chevron-right"
+              size={22}
+              color={colors.textTertiary}
+            />
+          </Pressable>
+        ) : null}
+
+        {/* How it works */}
+        <View style={styles.steps}>
+          <Step
+            index="1"
+            title="Paste a playlist"
+            body="Any public YouTube playlist link."
+          />
+          <Step
+            index="2"
+            title="We pick at random"
+            body="Weighted shuffle favours tracks you haven't heard recently."
+          />
+          <Step
+            index="3"
+            title="It just plays"
+            body="Next track is buffered while the current one finishes."
+          />
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 };
 
+const Step: React.FC<{ index: string; title: string; body: string }> = ({
+  index,
+  title,
+  body,
+}) => (
+  <View style={styles.step}>
+    <View style={styles.stepIndex}>
+      <Text style={styles.stepIndexText}>{index}</Text>
+    </View>
+    <View style={styles.stepBody}>
+      <Text style={styles.stepTitle}>{title}</Text>
+      <Text style={styles.stepText}>{body}</Text>
+    </View>
+  </View>
+);
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
-    padding: '5%',
+    backgroundColor: colors.background,
   },
   scrollContainer: {
-    flexGrow: 1,
+    paddingHorizontal: 24,
   },
-  header: {
+  brand: {
     alignItems: 'center',
-    marginBottom: '10%',
+    marginBottom: 36,
   },
-  title: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#ffffff',
-    marginBottom: 8,
+  logoMark: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    backgroundColor: colors.primarySoft,
+    borderWidth: 1,
+    borderColor: 'rgba(139, 92, 246, 0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 18,
   },
-  subtitle: {
-    fontSize: 16,
-    color: '#b0b0b0',
+  wordmark: {
+    color: colors.text,
+    fontSize: 30,
+    fontWeight: '800',
+    letterSpacing: 2.5,
+  },
+  wordmarkAccent: {
+    color: colors.primary,
+  },
+  tagline: {
+    color: colors.textSecondary,
+    fontSize: 14,
+    lineHeight: 21,
     textAlign: 'center',
+    marginTop: 10,
+    maxWidth: 300,
   },
-  inputSection: {
-    marginBottom: '8%',
-  },
-  inputContainer: {
-    marginBottom: '8%',
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.xxl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 18,
   },
   label: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#ffffff',
-    marginBottom: 12,
+    color: colors.textTertiary,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.4,
+    marginBottom: 10,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceVariant,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 12,
+    height: 50,
   },
   input: {
-    backgroundColor: '#2a2a2a',
-    color: '#ffffff',
-    fontSize: 16,
-    padding: '4%',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#3a3a3a',
-    minHeight: 80,
-    textAlignVertical: 'top',
+    flex: 1,
+    color: colors.text,
+    fontSize: 14,
+    marginHorizontal: 10,
+    paddingVertical: 0,
   },
-  button: {
-    backgroundColor: '#6366f1',
-    paddingVertical: '4%',
-    paddingHorizontal: '8%',
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: '5%',
-  },
-  buttonDisabled: {
-    backgroundColor: '#4a4a4a',
-  },
-  buttonText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '600',
-  },
-  playlistInfo: {
-    backgroundColor: '#2a2a2a',
-    padding: '5%',
-    borderRadius: 12,
-    marginBottom: '5%',
-  },
-  infoTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#ffffff',
-    marginBottom: 12,
-  },
-  infoText: {
-    fontSize: 16,
-    color: '#b0b0b0',
-    marginBottom: 8,
-  },
-  actionButtons: {
+  errorRow: {
     flexDirection: 'row',
-    marginTop: 20,
-    gap: 12,
+    alignItems: 'flex-start',
+    marginTop: 12,
   },
-  actionButton: {
+  errorText: {
+    color: colors.error,
+    fontSize: 13,
+    lineHeight: 18,
+    marginLeft: 6,
     flex: 1,
   },
-  primaryButton: {
-    backgroundColor: '#6366f1',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
+  tuneButton: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.lg,
+    height: 52,
+    marginTop: 16,
   },
-  secondaryButton: {
-    backgroundColor: '#3a3a3a',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    alignItems: 'center',
+  tuneButtonDisabled: {
+    backgroundColor: colors.surfaceElevated,
   },
-  primaryButtonText: {
-    color: '#ffffff',
+  tuneButtonPressed: {
+    backgroundColor: colors.primaryVariant,
+  },
+  tuneButtonText: {
+    color: colors.text,
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
+    marginLeft: 8,
   },
-  secondaryButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  footer: {
-    alignItems: 'center',
-    marginTop: 'auto',
-    paddingTop: 20,
-  },
-  footerText: {
-    fontSize: 14,
-    color: '#808080',
+  cardHint: {
+    color: colors.textTertiary,
+    fontSize: 12,
+    lineHeight: 17,
     textAlign: 'center',
-    lineHeight: 20,
+    marginTop: 14,
+  },
+  stationCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    marginTop: 16,
+  },
+  stationDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.live,
+    marginRight: 12,
+  },
+  stationText: {
+    flex: 1,
+  },
+  stationLabel: {
+    color: colors.textTertiary,
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1.3,
+  },
+  stationMeta: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  steps: {
+    marginTop: 32,
+  },
+  step: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 18,
+  },
+  stepIndex: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: colors.surfaceVariant,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
+    marginTop: 1,
+  },
+  stepIndexText: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  stepBody: {
+    flex: 1,
+  },
+  stepTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  stepText: {
+    color: colors.textTertiary,
+    fontSize: 12.5,
+    lineHeight: 18,
+    marginTop: 3,
+  },
+  pressed: {
+    opacity: 0.7,
   },
 });
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import time
 from typing import Any
 
 import yt_dlp
@@ -38,26 +40,17 @@ _STREAM_OPTS: dict[str, Any] = {
         # Prefer: m4a (better browser support), then webm, then fallback
         "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
     ),
-    "ignoreerrors": True,
-    # Add comprehensive browser-like headers to bypass YouTube bot detection
-    "http_headers": {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
-        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-    },
+    # Surface real errors instead of silently returning an empty result.
+    "ignoreerrors": False,
+    # NOTE: do not override http_headers here. yt-dlp negotiates its own request
+    # headers per YouTube API call and reports the ones playback needs in
+    # info["http_headers"]; injecting browser navigation headers makes YouTube
+    # answer with an unusable player response ("no stream URL").
     "noplaylist": True,  # Prevent playlist extraction to avoid bot detection
+    # Fail fast instead of hanging for a minute on a dead URL
+    "socket_timeout": 15,
+    "retries": 1,
+    "extractor_retries": 1,
     "extractor_args": {
         "youtube": {
             "player_client": ["android", "web"],
@@ -68,10 +61,29 @@ _STREAM_OPTS: dict[str, Any] = {
 # Invidious instances for fallback when YouTube direct extraction fails
 _INVIDIOUS_INSTANCES = [
     "https://yewtu.be",
-    "https://invidious.snopyta.org", 
-    "https://yewtu.be",
-    "https://vid.puffyan.us",
+    "https://inv.nadeko.net",
 ]
+
+# Fallback options for Invidious instances
+# ---------------------------------------------------------------------------
+# Stream URL cache
+#
+# A resolved googlevideo.com URL stays valid for hours while yt-dlp extraction
+# costs seconds. Caching it turns every repeat play / seek / reconnect into a
+# memory lookup, which is the single biggest latency win in the radio loop.
+# ---------------------------------------------------------------------------
+
+_STREAM_CACHE_TTL_S = 45 * 60  # refresh long before YouTube expires the URL
+_STREAM_CACHE_MAX = 512
+
+_stream_cache: dict[str, tuple[float, AudioStreamInfo]] = {}
+_resolve_inflight: dict[str, "asyncio.Task[AudioStreamInfo]"] = {}
+_prefetch_tasks: set["asyncio.Task[None]"] = set()
+
+# yt-dlp talks to YouTube, which rate-limits bursts. Prefetching a few tracks in
+# parallel is fine, a stampede is not: it provokes "Failed to extract any player
+# response", which is the very failure that made tracks unplayable.
+_EXTRACT_LIMITER = asyncio.Semaphore(2)
 
 # Fallback options for Invidious instances
 _INVIDIOUS_OPTS: dict[str, Any] = {
@@ -79,10 +91,7 @@ _INVIDIOUS_OPTS: dict[str, Any] = {
     "no_warnings": True,
     "skip_download": True,
     "format": "bestaudio/best",
-    "ignoreerrors": True,
-    "http_headers": {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
+    "ignoreerrors": False,
 }
 
 
@@ -117,15 +126,20 @@ async def fetch_playlist_songs(playlist_url: str) -> list[Song]:
     return songs
 
 
-async def resolve_audio_stream(video_id: str) -> AudioStreamInfo:
+async def resolve_audio_stream(
+    video_id: str, *, force_refresh: bool = False
+) -> AudioStreamInfo:
     """
     Resolve the best audio-only stream URL for a YouTube video.
 
-    The returned URL is a direct media URL (expires after a few hours).
-    Call this just-in-time, right before the song needs to play.
+    Results are cached in-process for :data:`_STREAM_CACHE_TTL_S` seconds, and
+    concurrent requests for the same video share a single yt-dlp extraction.
+    This is what makes pressing play feel instant: extraction costs 1-4 s of
+    network work, a cache hit costs microseconds.
 
     Args:
-        video_id: YouTube video ID (e.g. ``"dQw4w9WgXcQ"``)
+        video_id: YouTube video ID (e.g. ``"dQw4w9WgXcQ"``).
+        force_refresh: Ignore any cached entry (used when YouTube returns 403).
 
     Returns:
         :class:`AudioStreamInfo` with a ready-to-stream URL.
@@ -133,10 +147,80 @@ async def resolve_audio_stream(video_id: str) -> AudioStreamInfo:
     Raises:
         RuntimeError: If yt-dlp cannot extract stream info.
     """
+    if not force_refresh:
+        hit = cached_stream(video_id)
+        if hit is not None:
+            return hit
+
+    task = _resolve_inflight.get(video_id)
+    if task is None:
+        task = asyncio.create_task(_resolve_and_store(video_id))
+        _resolve_inflight[video_id] = task
+        task.add_done_callback(
+            lambda _t, vid=video_id: _resolve_inflight.pop(vid, None)
+        )
+
+    # shield(): if this particular request is cancelled (client navigated away)
+    # the shared extraction keeps running for everyone else.
+    return await asyncio.shield(task)
+
+
+def cached_stream(video_id: str) -> AudioStreamInfo | None:
+    """Return a still-valid cached stream for *video_id*, if there is one."""
+    entry = _stream_cache.get(video_id)
+    if entry is None:
+        return None
+    expires_at, info = entry
+    if expires_at <= time.monotonic():
+        _stream_cache.pop(video_id, None)
+        return None
+    return info
+
+
+def invalidate_stream(video_id: str) -> None:
+    """Drop a cached stream URL (e.g. after YouTube answers 403)."""
+    _stream_cache.pop(video_id, None)
+
+
+def prefetch_audio_stream(video_id: str) -> None:
+    """
+    Fire-and-forget stream resolution used to warm the cache ahead of playback.
+
+    Safe to call from any running event loop; never raises, and never starts a
+    second extraction for a video that is already cached or in flight.
+    """
+    if video_id in _stream_cache or video_id in _resolve_inflight:
+        return
+    try:
+        task = asyncio.create_task(_safe_prefetch(video_id))
+    except RuntimeError:  # no running loop — nothing to schedule on
+        return
+    _prefetch_tasks.add(task)
+    task.add_done_callback(_prefetch_tasks.discard)
+
+
+async def _safe_prefetch(video_id: str) -> None:
+    try:
+        await asyncio.wait_for(resolve_audio_stream(video_id), timeout=45)
+        logger.debug("Prefetched audio stream for %s", video_id)
+    except Exception as exc:  # noqa: BLE001 - best effort only
+        logger.debug("Prefetch failed for %s: %s", video_id, exc)
+
+
+async def _resolve_and_store(video_id: str) -> AudioStreamInfo:
     url = f"https://www.youtube.com/watch?v={video_id}"
     loop = asyncio.get_running_loop()
-    info = await loop.run_in_executor(None, _sync_resolve_stream, url)
-    logger.info("Resolved audio stream for %s → ext=%s abr=%s", video_id, info.ext, info.abr)
+    async with _EXTRACT_LIMITER:
+        info = await loop.run_in_executor(None, _sync_resolve_stream, url)
+    _self = video_id or info.video_id
+    if len(_stream_cache) >= _STREAM_CACHE_MAX:
+        # Evict the entry that expires soonest; URL validity is time-ordered.
+        oldest = min(_stream_cache, key=lambda k: _stream_cache[k][0])
+        _stream_cache.pop(oldest, None)
+    _stream_cache[_self] = (time.monotonic() + _STREAM_CACHE_TTL_S, info)
+    logger.info(
+        "Resolved audio stream for %s (ext=%s abr=%s)", video_id, info.ext, info.abr
+    )
     return info
 
 
@@ -166,12 +250,13 @@ def _sync_fetch_playlist(playlist_url: str) -> list[Song]:
             continue
 
         title = entry.get("title") or "Unknown Title"
-        # yt-dlp puts the uploader/channel as the closest thing to "artist"
-        artist = (
-            entry.get("uploader")
-            or entry.get("channel")
-            or entry.get("creator")
-            or "Unknown Artist"
+        # Flat playlist extraction usually has no channel info, so fall back to
+        # the "Artist - Song" convention most YouTube uploads follow.
+        artist = _guess_artist(
+            title,
+            entry.get("uploader"),
+            entry.get("channel"),
+            entry.get("creator"),
         )
         duration = entry.get("duration") or 0
         thumbnail = _best_thumbnail(entry.get("thumbnails") or [])
@@ -191,16 +276,20 @@ def _sync_fetch_playlist(playlist_url: str) -> list[Song]:
 
 def _sync_resolve_stream(url: str) -> AudioStreamInfo:
     """Blocking yt-dlp call — must be run in an executor."""
-    # Try YouTube first
-    try:
-        with yt_dlp.YoutubeDL(_STREAM_OPTS) as ydl:
-            info = ydl.extract_info(url, download=False)
-        
-        if info and info.get("url"):
-            return _create_stream_info(info)
-    except Exception as e:
-        logger.warning(f"YouTube direct extraction failed: {e}")
-    
+    # Try YouTube first. Extraction is occasionally flaky ("Failed to extract any
+    # player response"), so give it one retry before using the slower fallback.
+    for attempt in range(2):
+        try:
+            with yt_dlp.YoutubeDL(_STREAM_OPTS) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info and info.get("url"):
+                return _create_stream_info(info)
+            logger.warning("YouTube returned no stream URL (attempt %d)", attempt + 1)
+        except Exception as e:
+            logger.warning("YouTube direct extraction failed (attempt %d): %s", attempt + 1, e)
+        if attempt == 0:
+            time.sleep(0.8)
+
     # Fallback to Invidious instances
     video_id = url.split("v=")[-1].split("&")[0]
     for instance in _INVIDIOUS_INSTANCES:
@@ -247,6 +336,24 @@ def _create_stream_info(info: dict) -> AudioStreamInfo:
         # Fall back to checking the selected format dict if top-level is empty.
         http_headers=info.get("http_headers") or _extract_headers_from_formats(info),
     )
+
+
+_ARTIST_SEPARATOR = re.compile(r"\s+[-–—]\s+")
+
+
+def _guess_artist(title: str, *candidates: str | None) -> str:
+    """Best-effort artist name: channel info first, then the title prefix."""
+    for candidate in candidates:
+        if candidate and candidate.strip():
+            return candidate.strip()
+
+    parts = _ARTIST_SEPARATOR.split(title, maxsplit=1)
+    if len(parts) == 2:
+        head = parts[0].strip()
+        # Only trust short prefixes; long ones are usually the song title.
+        if 0 < len(head) <= 60:
+            return head
+    return "Unknown Artist"
 
 
 def _best_thumbnail(thumbnails: list[dict]) -> str | None:

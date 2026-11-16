@@ -5,7 +5,7 @@ Pydantic models for songs, playlist state, and audio stream info.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import BaseModel, Field, HttpUrl
@@ -38,7 +38,7 @@ class Song(BaseModel):
     def mark_played(self) -> None:
         """Update tracking fields when a song starts playing."""
         self.play_count += 1
-        self.last_played_at = datetime.utcnow()
+        self.last_played_at = datetime.now(tz=timezone.utc)
 
 
 class PlaylistState(BaseModel):

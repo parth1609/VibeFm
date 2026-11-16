@@ -10,7 +10,10 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "n"
+      "bundleIdentifier": "n",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -47,9 +50,9 @@
     },
     "extra": {
       "eas": {
-        "projectId": "d8b89890-d1d3-459a-b47f-5e4aba365944"
+        "projectId": "4568186d-9008-4e06-9d2b-d1371f70447c"
       }
     },
-    "owner": "parthpatils-organization"
+    "owner": "parth_patil"
   }
 }

@@ -1,27 +1,31 @@
 export const colors = {
   // Background colors
-  background: '#1a1a1a',
-  surface: '#2a2a2a',
-  surfaceVariant: '#3a3a3a',
-  
+  background: '#08080C',
+  surface: '#13131C',
+  surfaceVariant: '#1C1C28',
+  surfaceElevated: '#262633',
+
   // Text colors
   text: '#ffffff',
-  textSecondary: '#b0b0b0',
-  textTertiary: '#808080',
-  
+  textSecondary: '#A5A5B8',
+  textTertiary: '#6E6E82',
+
   // Primary colors
-  primary: '#6366f1',
-  primaryVariant: '#4f46e5',
-  
+  primary: '#8B5CF6',
+  primaryVariant: '#7C3AED',
+  primarySoft: 'rgba(139, 92, 246, 0.16)',
+  accent: '#22D3EE',
+
   // Status colors
-  error: '#ef4444',
-  warning: '#f59e0b',
-  success: '#10b981',
-  
+  live: '#F43F5E',
+  error: '#F87171',
+  warning: '#FBBF24',
+  success: '#34D399',
+
   // Border colors
-  border: '#3a3a3a',
-  borderVariant: '#4a4a4a',
-  
+  border: '#242433',
+  borderVariant: '#33334A',
+
   // Overlay colors
   overlay: 'rgba(0, 0, 0, 0.5)',
   overlayLight: 'rgba(0, 0, 0, 0.3)',
@@ -41,6 +45,7 @@ export const borderRadius = {
   md: 8,
   lg: 12,
   xl: 16,
+  xxl: 24,
   full: 9999,
 };
 

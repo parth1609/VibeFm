@@ -16,6 +16,7 @@ def setup_logging():
     # Dial down noisy third-party libraries so our custom request logs stand out
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Expose a default logger for this file if needed
 logger = logging.getLogger(__name__)

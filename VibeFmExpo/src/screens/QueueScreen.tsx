@@ -1,19 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  FlatList,
-  TouchableOpacity,
-  StyleSheet,
-  Image,
   ActivityIndicator,
-  Alert,
+  FlatList,
+  Pressable,
   RefreshControl,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
+import { Image } from 'expo-image';
+import { MaterialIcons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StackNavigationProp } from '@react-navigation/stack';
 import { apiService } from '../services/api';
 import { Song } from '../types';
-import { StackNavigationProp } from '@react-navigation/stack';
-import { MaterialIcons } from '@expo/vector-icons';
+import { colors, borderRadius } from '../styles/colors';
 
 type RootStackParamList = {
   Playlist: undefined;
@@ -28,147 +29,132 @@ interface Props {
 }
 
 const QueueScreen: React.FC<Props> = ({ navigation }) => {
+  const insets = useSafeAreaInsets();
   const [queue, setQueue] = useState<Song[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadQueue();
-  }, []);
-
-  const loadQueue = async () => {
+  const loadQueue = useCallback(async () => {
     try {
       const queueData = await apiService.getQueue();
       setQueue(queueData);
-    } catch (error) {
-      Alert.alert('Error', error instanceof Error ? error.message : 'Failed to load queue');
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the queue.');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, []);
 
-  const handleRefresh = () => {
-    setRefreshing(true);
-    loadQueue();
-  };
-
-  const handleSongPress = (song: Song) => {
-    // Navigate to player with specific song
-    // In a real implementation, you'd pass the song and queue position
-    Alert.alert('Song Selected', `Would play: ${song.title}`);
-  };
+  useEffect(() => {
+    void loadQueue();
+  }, [loadQueue]);
 
   const formatDuration = (seconds: number): string => {
+    if (!seconds) return '--:--';
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const renderSongItem = ({ item, index }: { item: Song; index: number }) => (
-    <TouchableOpacity 
-      style={styles.songItem}
-      onPress={() => handleSongPress(item)}
-    >
-      <View style={styles.songNumber}>
-        <Text style={styles.songNumberText}>{index + 1}</Text>
-      </View>
-      
+  const renderSong = ({ item, index }: { item: Song; index: number }) => (
+    <View style={styles.row}>
+      <Text style={styles.index}>{String(index + 1).padStart(2, '0')}</Text>
+
       {item.thumbnail_url ? (
-        <Image source={{ uri: item.thumbnail_url }} style={styles.thumbnail} />
+        <Image
+          source={{ uri: item.thumbnail_url }}
+          style={styles.thumbnail}
+          contentFit="cover"
+          cachePolicy="memory-disk"
+          transition={150}
+          accessibilityIgnoresInvertColors
+        />
       ) : (
-        <View style={[styles.thumbnail, styles.placeholderThumbnail]}>
-          <MaterialIcons name="music-note" size={20} color="#4a4a4a" />
+        <View style={[styles.thumbnail, styles.thumbnailPlaceholder]}>
+          <MaterialIcons name="music-note" size={18} color={colors.textTertiary} />
         </View>
       )}
-      
-      <View style={styles.songInfo}>
-        <Text style={styles.songTitle} numberOfLines={1}>
+
+      <View style={styles.rowText}>
+        <Text style={styles.rowTitle} numberOfLines={1}>
           {item.title}
         </Text>
-        <Text style={styles.artistName} numberOfLines={1}>
+        <Text style={styles.rowArtist} numberOfLines={1}>
           {item.artist}
+          {item.play_count > 0 ? `  ·  played ${item.play_count}×` : ''}
         </Text>
       </View>
-      
-      <View style={styles.songMeta}>
-        <Text style={styles.duration}>
-          {formatDuration(item.duration_sec)}
-        </Text>
-        {item.play_count > 0 && (
-          <View style={styles.playCount}>
-            <MaterialIcons name="play-arrow" size={12} color="#6366f1" />
-            <Text style={styles.playCountText}>{item.play_count}</Text>
-          </View>
-        )}
-      </View>
-    </TouchableOpacity>
-  );
 
-  const renderSeparator = () => <View style={styles.separator} />;
-
-  const renderHeader = () => (
-    <View style={styles.header}>
-      <Text style={styles.headerTitle}>Queue</Text>
-      <Text style={styles.queueInfo}>
-        {queue.length} songs in queue
-      </Text>
+      <Text style={styles.duration}>{formatDuration(item.duration_sec)}</Text>
     </View>
   );
 
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#6366f1" />
-        <Text style={styles.loadingText}>Loading queue...</Text>
-      </View>
-    );
-  }
-
   return (
     <View style={styles.container}>
-      <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <MaterialIcons name="arrow-back" size={24} color="#ffffff" />
-        </TouchableOpacity>
-        <Text style={styles.topBarTitle}>Queue</Text>
-        <TouchableOpacity onPress={handleRefresh}>
-          <MaterialIcons name="refresh" size={24} color="#ffffff" />
-        </TouchableOpacity>
+      <View style={[styles.topBar, { paddingTop: insets.top + 10 }]}>
+        <Pressable hitSlop={12} onPress={() => navigation.goBack()}>
+          <MaterialIcons name="keyboard-arrow-down" size={28} color={colors.text} />
+        </Pressable>
+
+        <View style={styles.topBarText}>
+          <Text style={styles.topBarTitle}>Up next</Text>
+          <Text style={styles.topBarSubtitle}>
+            {queue.length ? `${queue.length} songs in rotation` : 'Nothing queued'}
+          </Text>
+        </View>
+
+        <Pressable hitSlop={12} onPress={() => void loadQueue()}>
+          <MaterialIcons name="refresh" size={22} color={colors.textSecondary} />
+        </Pressable>
       </View>
 
-      <FlatList
-        data={queue}
-        renderItem={renderSongItem}
-        keyExtractor={(item) => item.video_id}
-        ItemSeparatorComponent={renderSeparator}
-        ListHeaderComponent={renderHeader}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            tintColor="#6366f1"
-            colors={["#6366f1"]}
-          />
-        }
-        contentContainerStyle={styles.listContainer}
-        showsVerticalScrollIndicator={false}
-      />
-
-      {queue.length === 0 && (
-        <View style={styles.emptyState}>
-          <MaterialIcons name="queue-music" size={64} color="#4a4a4a" />
-          <Text style={styles.emptyTitle}>No songs in queue</Text>
-          <Text style={styles.emptySubtitle}>
-            Load a playlist to start building your queue
+      {loading ? (
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={styles.centeredText}>Loading queue…</Text>
+        </View>
+      ) : queue.length === 0 ? (
+        <View style={styles.centered}>
+          <View style={styles.emptyIcon}>
+            <MaterialIcons name="queue-music" size={32} color={colors.textTertiary} />
+          </View>
+          <Text style={styles.emptyTitle}>
+            {error ? 'Off air' : 'No songs queued'}
           </Text>
-          <TouchableOpacity
-            style={styles.loadPlaylistButton}
+          <Text style={styles.centeredText}>
+            {error ?? 'Load a playlist and the shuffle will fill this list.'}
+          </Text>
+          <Pressable
+            style={({ pressed }) => [styles.cta, pressed && styles.pressed]}
             onPress={() => navigation.navigate('Playlist')}
           >
-            <Text style={styles.loadPlaylistButtonText}>Load Playlist</Text>
-          </TouchableOpacity>
+            <Text style={styles.ctaText}>Choose a playlist</Text>
+          </Pressable>
         </View>
+      ) : (
+        <FlatList
+          data={queue}
+          keyExtractor={(item, index) => `${item.video_id}-${index}`}
+          renderItem={renderSong}
+          ItemSeparatorComponent={() => <View style={styles.separator} />}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => {
+                setRefreshing(true);
+                void loadQueue();
+              }}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+              progressBackgroundColor={colors.surface}
+            />
+          }
+        />
       )}
     </View>
   );
@@ -177,147 +163,118 @@ const QueueScreen: React.FC<Props> = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: colors.background,
   },
   topBar: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: '5%',
-    paddingVertical: '4%',
-    backgroundColor: '#2a2a2a',
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+  },
+  topBarText: {
+    flex: 1,
+    alignItems: 'center',
   },
   topBarTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#ffffff',
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '700',
   },
-  listContainer: {
-    flexGrow: 1,
+  topBarSubtitle: {
+    color: colors.textTertiary,
+    fontSize: 11,
+    marginTop: 2,
   },
-  songItem: {
+  row: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: '4%',
-    backgroundColor: '#1a1a1a',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
   },
-  songNumber: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#2a2a2a',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: '4%',
-  },
-  songNumberText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '600',
+  index: {
+    color: colors.textTertiary,
+    fontSize: 12,
+    fontVariant: ['tabular-nums'],
+    width: 26,
   },
   thumbnail: {
-    width: 50,
-    height: 50,
-    borderRadius: 8,
-    marginRight: '4%',
+    width: 46,
+    height: 46,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceVariant,
   },
-  placeholderThumbnail: {
-    backgroundColor: '#2a2a2a',
+  thumbnailPlaceholder: {
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
   },
-  songInfo: {
+  rowText: {
     flex: 1,
-  },
-  songTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#ffffff',
-    marginBottom: 4,
-  },
-  artistName: {
-    fontSize: 14,
-    color: '#b0b0b0',
-  },
-  songMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  duration: {
-    fontSize: 14,
-    color: '#808080',
+    marginLeft: 14,
     marginRight: 12,
   },
-  playCount: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  rowTitle: {
+    color: colors.text,
+    fontSize: 14.5,
+    fontWeight: '600',
   },
-  playCountText: {
+  rowArtist: {
+    color: colors.textTertiary,
     fontSize: 12,
-    color: '#6366f1',
-    marginLeft: 4,
+    marginTop: 3,
+  },
+  duration: {
+    color: colors.textTertiary,
+    fontSize: 12,
+    fontVariant: ['tabular-nums'],
   },
   separator: {
     height: 1,
-    backgroundColor: '#2a2a2a',
-    marginHorizontal: '4%',
+    backgroundColor: colors.border,
+    marginLeft: 106,
+    marginRight: 20,
   },
-  emptyState: {
+  centered: {
     flex: 1,
-    justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: '20%',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+    paddingBottom: 60,
+  },
+  centeredText: {
+    color: colors.textSecondary,
+    fontSize: 13.5,
+    lineHeight: 20,
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  emptyIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 18,
   },
   emptyTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#ffffff',
-    marginTop: 16,
-    marginBottom: 8,
+    color: colors.text,
+    fontSize: 17,
+    fontWeight: '700',
   },
-  emptySubtitle: {
-    fontSize: 16,
-    color: '#b0b0b0',
-    textAlign: 'center',
-    marginBottom: 24,
-  },
-  loadPlaylistButton: {
-    backgroundColor: '#6366f1',
+  cta: {
+    marginTop: 22,
+    backgroundColor: colors.primary,
     paddingHorizontal: 24,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: borderRadius.full,
   },
-  loadPlaylistButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
+  ctaText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '700',
   },
-  // Missing styles that are referenced in JSX
-  header: {
-    paddingHorizontal: '5%',
-    paddingVertical: '4%',
-    backgroundColor: '#2a2a2a',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#ffffff',
-    marginBottom: 8,
-  },
-  queueInfo: {
-    fontSize: 16,
-    color: '#b0b0b0',
-  },
-  loadingContainer: {
-    flex: 1,
-    backgroundColor: '#1a1a1a',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loadingText: {
-    color: '#ffffff',
-    fontSize: 16,
-    marginTop: 16,
+  pressed: {
+    opacity: 0.7,
   },
 });
 

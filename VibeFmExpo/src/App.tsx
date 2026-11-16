@@ -6,7 +6,7 @@ import PlayerScreen from './screens/PlayerScreen';
 import QueueScreen from './screens/QueueScreen';
 import { LoadPlaylistResponse } from './types';
 
-const Stack = createStackNavigator();
+const Stack = createStackNavigator<RootStackParamList>();
 
 type RootStackParamList = {
   Playlist: undefined;

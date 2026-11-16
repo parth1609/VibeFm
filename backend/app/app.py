@@ -3,9 +3,9 @@ import logging
 from starlette.types import ASGIApp, Receive, Scope, Send
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.modules.playlist.router import router as playlist_router
-from app.modules.rj.router import router as rj_router
-from app.core.logger import setup_logging
+from .modules.playlist.router import router as playlist_router
+from .modules.rj.router import router as rj_router
+from .core.logger import setup_logging
 
 # Initialize standard logging
 setup_logging()
@@ -91,4 +91,4 @@ def read_root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("backend.app.app:app", host="0.0.0.0", port=8000, reload=True)
