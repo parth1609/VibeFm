@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="VibeFm API",
     description="AI Personal Radio Station Backend API",
-    version="1.2.0"
+    version="1.2.1"
 )
 
 # CORS — allow the Flutter app to call the backend from any origin (dev mode)

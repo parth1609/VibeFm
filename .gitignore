@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Prebuilt Expo web export shipped with the backend image.
+# Must stay tracked even though vendored paths contain build/ and node_modules/.
+!web/
+!web/**
