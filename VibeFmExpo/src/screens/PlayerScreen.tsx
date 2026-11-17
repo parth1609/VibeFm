@@ -4,6 +4,7 @@ import {
   Dimensions,
   GestureResponderEvent,
   LayoutChangeEvent,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -16,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { apiService } from '../services/api';
 import { LoadPlaylistResponse, NextSongResponse } from '../types';
+import YouTubeAudio, { YouTubeAudioHandle } from '../components/YouTubeAudio';
 import { colors, borderRadius } from '../styles/colors';
 
 type RootStackParamList = {
@@ -34,7 +36,8 @@ interface Props {
 /** A fully loaded (but not yet playing) track waiting for the current one to end. */
 type StandbyTrack = {
   payload: NextSongResponse;
-  sound: Audio.Sound;
+  // Only the native engine preloads a Sound; the web embed holds just the song.
+  sound: Audio.Sound | null;
 };
 
 const ART_SIZE = Math.min(Dimensions.get('window').width * 0.74, 340);
@@ -42,6 +45,8 @@ const ART_SIZE = Math.min(Dimensions.get('window').width * 0.74, 340);
 const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
   const insets = useSafeAreaInsets();
   const { playlist } = route.params;
+  // Web plays through a hidden YouTube embed on the listener's own connection.
+  const isWeb = Platform.OS === 'web';
 
   const [nowPlaying, setNowPlaying] = useState<NextSongResponse | null>(null);
   const [standby, setStandby] = useState<NextSongResponse | null>(null);
@@ -54,6 +59,7 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
   const [error, setError] = useState<string | null>(null);
 
   const soundRef = useRef<Audio.Sound | null>(null);
+  const ytRef = useRef<YouTubeAudioHandle | null>(null);
   const standbyRef = useRef<StandbyTrack | null>(null);
   const advancingRef = useRef(false);
   const prefetchingRef = useRef(false);
@@ -98,10 +104,22 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
 
   const playTrack = useCallback(
     async (payload: NextSongResponse, shouldPlay = true) => {
+      if (isWeb) {
+        setNowPlaying(payload);
+        setDurationMs(Math.max(0, (payload.song.duration_sec ?? 0) * 1000));
+        setPositionMs(0);
+        setError(null);
+        ytRef.current?.load(payload.song.video_id, shouldPlay);
+        return;
+      }
+
       const previous = soundRef.current;
 
       const { sound } = await Audio.Sound.createAsync(
-        { uri: payload.playback_url },
+        {
+          uri:
+            payload.playback_url ?? apiService.getAudioUrl(payload.song.video_id),
+        },
         {
           shouldPlay,
           isLooping: false,
@@ -138,7 +156,9 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
     // A dead video in a playlist should cost one skip, not the whole station.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const payload = await apiService.getNextSong();
+        const payload: NextSongResponse = isWeb
+          ? await apiService.getNextSongEmbed()
+          : await apiService.getNextSong();
         if (!mountedRef.current) return;
         await playTrack(payload, true);
         void prefetchNextRef.current();
@@ -157,7 +177,7 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
       );
       setLoading(false);
     }
-  }, [playTrack]);
+  }, [isWeb, playTrack]);
 
   /**
    * Buffer the next random track while the current one plays, so the
@@ -167,11 +187,22 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
     if (prefetchingRef.current || standbyRef.current) return;
     prefetchingRef.current = true;
     try {
-      const payload = await apiService.getNextSong();
+      const payload: NextSongResponse = isWeb
+        ? await apiService.getNextSongEmbed()
+        : await apiService.getNextSong();
       if (!mountedRef.current || standbyRef.current) return;
 
+      if (isWeb) {
+        standbyRef.current = { payload, sound: null };
+        setStandby(payload);
+        return;
+      }
+
       const { sound } = await Audio.Sound.createAsync(
-        { uri: payload.playback_url },
+        {
+          uri:
+            payload.playback_url ?? apiService.getAudioUrl(payload.song.video_id),
+        },
         { shouldPlay: false, isLooping: false }
       );
 
@@ -187,7 +218,7 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
     } finally {
       prefetchingRef.current = false;
     }
-  }, []);
+  }, [isWeb]);
 
   // Stable bridge so `prefetchNext` can be used before its declaration.
   const prefetchNextRef = useRef(prefetchNext);
@@ -202,15 +233,25 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
         standbyRef.current = null;
         setStandby(null);
 
+        if (isWeb) {
+          setNowPlaying(next.payload);
+          setPositionMs(0);
+          setDurationMs(Math.max(0, (next.payload.song.duration_sec ?? 0) * 1000));
+          setError(null);
+          ytRef.current?.load(next.payload.song.video_id, true);
+          void prefetchNextRef.current();
+          return;
+        }
+
         const previous = soundRef.current;
         soundRef.current = next.sound;
 
-        attachStatus(next.sound);
+        if (next.sound) attachStatus(next.sound);
         setNowPlaying(next.payload);
         setPositionMs(0);
         setDurationMs(Math.max(0, (next.payload.song.duration_sec ?? 0) * 1000));
         setError(null);
-        await next.sound.playAsync();
+        await next.sound?.playAsync();
 
         if (previous) {
           try {
@@ -227,7 +268,7 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
     } finally {
       advancingRef.current = false;
     }
-  }, [attachStatus, loadNextNow]);
+  }, [attachStatus, isWeb, loadNextNow]);
 
   useEffect(() => {
     endHandlerRef.current = () => {
@@ -244,13 +285,15 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
 
     const boot = async () => {
       try {
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: false,
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: false,
-          shouldDuckAndroid: true,
-          playThroughEarpieceAndroid: false,
-        });
+        if (!isWeb) {
+          await Audio.setAudioModeAsync({
+            allowsRecordingIOS: false,
+            playsInSilentModeIOS: true,
+            staysActiveInBackground: false,
+            shouldDuckAndroid: true,
+            playThroughEarpieceAndroid: false,
+          });
+        }
       } catch {
         // Audio mode is best effort; playback still works without it.
       }
@@ -266,7 +309,7 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
       soundRef.current = null;
       standbyRef.current = null;
       sound?.unloadAsync().catch(() => {});
-      standbyTrack?.sound.unloadAsync().catch(() => {});
+      standbyTrack?.sound?.unloadAsync().catch(() => {});
     };
   }, [loadNextNow]);
 
@@ -275,6 +318,12 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
   // ---------------------------------------------------------------------
 
   const togglePlay = useCallback(async () => {
+    if (isWeb) {
+      if (isPlaying) ytRef.current?.pause();
+      else ytRef.current?.play();
+      return;
+    }
+
     const sound = soundRef.current;
     if (!sound) return;
     try {
@@ -287,9 +336,16 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
     } catch {
       // Ignore transient native errors.
     }
-  }, []);
+  }, [isPlaying, isWeb]);
 
   const restartTrack = useCallback(async () => {
+    if (isWeb) {
+      ytRef.current?.seekToMs(0);
+      ytRef.current?.play();
+      setPositionMs(0);
+      return;
+    }
+
     const sound = soundRef.current;
     if (!sound) return;
     try {
@@ -298,12 +354,21 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
     } catch {
       // Ignore.
     }
-  }, []);
+  }, [isWeb]);
 
   const seekTo = useCallback(async (fraction: number) => {
-    const sound = soundRef.current;
     const total = durationMs;
-    if (!sound || total <= 0) return;
+    if (total <= 0) return;
+
+    if (isWeb) {
+      const target = Math.min(0.995, Math.max(0, fraction)) * total;
+      ytRef.current?.seekToMs(target);
+      setPositionMs(target);
+      return;
+    }
+
+    const sound = soundRef.current;
+    if (!sound) return;
     const clamped = Math.min(0.995, Math.max(0, fraction));
     try {
       await sound.setPositionAsync(Math.round(clamped * total));
@@ -311,7 +376,7 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
     } catch {
       // Ignore.
     }
-  }, [durationMs]);
+  }, [durationMs, isWeb]);
 
   const fractionFromTouch = (event: GestureResponderEvent): number => {
     const width = seekWidthRef.current;
@@ -333,6 +398,32 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
 
   const playedFraction =
     scrubFraction ?? (durationMs > 0 ? Math.min(1, positionMs / durationMs) : 0);
+
+  // ---------------------------------------------------------------------
+  // Web embed callbacks
+  // ---------------------------------------------------------------------
+
+  const handleEmbedState = useCallback(
+    (next: {
+      positionMs: number;
+      durationMs: number;
+      playing: boolean;
+      buffering: boolean;
+    }) => {
+      if (!mountedRef.current) return;
+      setPositionMs(next.positionMs);
+      if (next.durationMs > 0) setDurationMs(next.durationMs);
+      setIsPlaying(next.playing);
+      setIsBuffering(next.buffering);
+    },
+    []
+  );
+
+  const handleEmbedError = useCallback((message: string) => {
+    if (!mountedRef.current) return;
+    setError(message);
+    if (!advancingRef.current) endHandlerRef.current();
+  }, []);
 
   // ---------------------------------------------------------------------
   // First-load screen
@@ -388,6 +479,15 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
 
   return (
     <View style={styles.container}>
+      {isWeb ? (
+        <YouTubeAudio
+          ref={ytRef}
+          onState={handleEmbedState}
+          onEnded={() => endHandlerRef.current()}
+          onError={handleEmbedError}
+        />
+      ) : null}
+
       {/* Blurred art wash */}
       {art ? (
         <Image

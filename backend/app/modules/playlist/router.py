@@ -112,6 +112,12 @@ class NextSongResponse(BaseModel):
     playback_url: str
 
 
+class EmbedSongResponse(BaseModel):
+    """A track the browser plays itself, so no stream URL is resolved."""
+
+    song: Song
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -138,6 +144,18 @@ def _rebuild_queue() -> None:
 def _playback_url(request: Request, video_id: str) -> str:
     base = str(request.base_url).rstrip("/")
     return f"{base}/playlist/audio/{video_id}"
+
+
+def _advance_queue() -> Song:
+    """Move the queue cursor on one track and return it (no stream resolution)."""
+    global _queue_index
+    if _queue_index + 1 >= len(_session_queue):
+        logger.info("Queue exhausted — rebuilding with refreshed weights.")
+        _rebuild_queue()
+        _queue_index = 0
+    else:
+        _queue_index += 1
+    return _session_queue[_queue_index]
 
 
 # ---------------------------------------------------------------------------
@@ -210,14 +228,7 @@ async def get_next_song(request: Request) -> NextSongResponse:
 
     # Try a handful of tracks so one unplayable video never stalls the station.
     for _ in range(4):
-        if _queue_index + 1 >= len(_session_queue):
-            logger.info("Queue exhausted — rebuilding with refreshed weights.")
-            _rebuild_queue()
-            _queue_index = 0
-        else:
-            _queue_index += 1
-
-        song = _session_queue[_queue_index]
+        song = _advance_queue()
         try:
             stream = cached_stream(song.video_id) or await resolve_audio_stream(
                 song.video_id
@@ -264,6 +275,30 @@ async def get_next_song(request: Request) -> NextSongResponse:
             f"Last error: {last_error}"
         ),
     )
+
+
+@router.get("/next/embed", response_model=EmbedSongResponse)
+async def get_next_song_embed() -> EmbedSongResponse:
+    """
+    Next queue entry **without** resolving a stream URL.
+
+    The web player streams the track in the listener's own browser through a
+    YouTube embed, so the backend's IP never has to reach googlevideo. That
+    makes the station playable on hosts YouTube refuses to stream to.
+    """
+    global _last_played_id
+
+    if not _session_songs:
+        raise HTTPException(
+            status_code=400,
+            detail="No playlist loaded. Call POST /playlist/load first.",
+        )
+
+    song = _advance_queue()
+    song.mark_played()
+    _last_played_id = song.video_id
+    logger.info("Queued '%s' (%s) for browser playback", song.title, song.video_id)
+    return EmbedSongResponse(song=song)
 
 
 @router.get("/stream/{video_id}", response_model=AudioStreamInfo)

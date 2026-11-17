@@ -32,6 +32,11 @@ export interface LoadPlaylistResponse {
 
 export interface NextSongResponse {
   song: Song;
-  stream: AudioStreamInfo;
-  playback_url: string;
+  // Absent when the client plays the track itself (web embed playback).
+  stream?: AudioStreamInfo;
+  playback_url?: string;
+}
+
+export interface EmbedSongResponse {
+  song: Song;
 }

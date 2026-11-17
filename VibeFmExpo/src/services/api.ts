@@ -1,6 +1,7 @@
 import Constants from 'expo-constants';
 import {
   AudioStreamInfo,
+  EmbedSongResponse,
   LoadPlaylistRequest,
   LoadPlaylistResponse,
   NextSongResponse,
@@ -99,6 +100,14 @@ class ApiService {
   /** Advance the station's queue and get the next random track. */
   async getNextSong(): Promise<NextSongResponse> {
     return this.request<NextSongResponse>('/playlist/next', {}, 45_000);
+  }
+
+  /**
+   * Next track without a stream URL, for clients that play the video
+   * themselves (the web build uses a YouTube embed).
+   */
+  async getNextSongEmbed(): Promise<EmbedSongResponse> {
+    return this.request<EmbedSongResponse>('/playlist/next/embed', {}, 20_000);
   }
 
   async getStreamInfo(videoId: string): Promise<AudioStreamInfo> {
