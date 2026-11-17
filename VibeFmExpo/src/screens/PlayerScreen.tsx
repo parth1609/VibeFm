@@ -354,11 +354,23 @@ const PlayerScreen: React.FC<Props> = ({ route, navigation }) => {
   }
 
   if (error && !nowPlaying) {
+    // The backend answers 503 with this hint when YouTube refuses the host's IP.
+    const needsServerSetup = error.includes('YTDLP_COOKIES');
     return (
       <View style={styles.centered}>
-        <MaterialIcons name="wifi-off" size={44} color={colors.textTertiary} />
-        <Text style={styles.loadingTitle}>Off air</Text>
-        <Text style={[styles.loadingSubtitle, styles.errorText]}>{error}</Text>
+        <MaterialIcons
+          name={needsServerSetup ? 'cloud-off' : 'wifi-off'}
+          size={44}
+          color={colors.textTertiary}
+        />
+        <Text style={styles.loadingTitle}>
+          {needsServerSetup ? 'Station needs one setup step' : 'Off air'}
+        </Text>
+        <Text style={styles.loadingSubtitle}>
+          {needsServerSetup
+            ? 'The playlist loaded fine, but YouTube will not stream audio to this server. Add a YouTube cookie to the backend as YTDLP_COOKIES and it will play. Running the backend on your own machine needs none of this.'
+            : error}
+        </Text>
         <Pressable
           style={({ pressed }) => [styles.retryButton, pressed && styles.pressed]}
           onPress={() => void loadNextNow()}
