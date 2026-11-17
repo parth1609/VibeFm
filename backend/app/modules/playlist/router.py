@@ -204,6 +204,7 @@ async def get_next_song(request: Request) -> NextSongResponse:
 
     started = time.perf_counter()
     last_error: Exception | None = None
+    blocked = False
 
     # Try a handful of tracks so one unplayable video never stalls the station.
     for _ in range(4):
@@ -220,8 +221,12 @@ async def get_next_song(request: Request) -> NextSongResponse:
                 song.video_id
             )
         except YouTubeBlockedError as exc:
-            # Every track will fail the same way, so surface it immediately.
-            raise HTTPException(status_code=503, detail=BLOCKED_HINT) from exc
+            # A refusal is per video and per client, not per host: the next
+            # track usually still streams, so skip instead of going off air.
+            blocked = True
+            last_error = exc
+            logger.warning("YouTube refused %s - trying another track", song.video_id)
+            continue
         except Exception as exc:  # noqa: BLE001 - try the next track instead
             last_error = exc
             logger.warning("Skipping %s (%s)", song.video_id, exc)
@@ -246,6 +251,9 @@ async def get_next_song(request: Request) -> NextSongResponse:
             stream=stream,
             playback_url=_playback_url(request, song.video_id),
         )
+
+    if blocked:
+        raise HTTPException(status_code=503, detail=BLOCKED_HINT)
 
     raise HTTPException(
         status_code=502,

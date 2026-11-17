@@ -83,12 +83,10 @@ _CLIENT_STRATEGIES: tuple[tuple[str, ...], ...] = (
 _RESOLVE_BUDGET_S = 20.0
 _PROBE_TIMEOUT_S = 12.0
 
-# YouTube answers datacenter IPs with "Sign in to confirm you're not a bot".
-# Every following request from the same host gets the same answer, so remember
-# it briefly and fail fast instead of re-probing every track.
-_BLOCKED_TTL_S = 15 * 60
-_blocked_until: float = 0.0
-
+# YouTube answers datacenter IPs with "Sign in to confirm you're not a bot",
+# but not for every video and not for every client: a host refused one track
+# often streams the next one. So a refusal is never cached across requests --
+# the caller skips to another track instead of taking the station off air.
 _BLOCKED_MARKERS = (
     "sign in to confirm",
     "confirm you're not a bot",
@@ -106,16 +104,6 @@ BLOCKED_HINT = (
 
 class YouTubeBlockedError(RuntimeError):
     """YouTube will not hand out streams to this host without credentials."""
-
-
-def youtube_blocked() -> bool:
-    """True while this host is known to be blocked by YouTube."""
-    return time.monotonic() < _blocked_until
-
-
-def _mark_blocked() -> None:
-    global _blocked_until
-    _blocked_until = time.monotonic() + _BLOCKED_TTL_S
 
 
 def _looks_blocked(message: object) -> bool:
@@ -201,10 +189,6 @@ async def resolve_audio_stream(
         hit = cached_stream(video_id)
         if hit is not None:
             return hit
-
-    # Known-blocked host without cookies: don't burn 10s per track to re-learn it.
-    if youtube_blocked() and _cookie_file() is None:
-        raise YouTubeBlockedError(BLOCKED_HINT)
 
     task = _resolve_inflight.get(video_id)
     if task is None:
@@ -390,9 +374,6 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
     deadline = time.monotonic() + _RESOLVE_BUDGET_S
     last_error: object = "no client returned a playable URL"
 
-    if youtube_blocked() and _cookie_file() is None:
-        raise YouTubeBlockedError(BLOCKED_HINT)
-
     # A cookie jar is not a guaranteed win: yt-dlp skips every client that
     # cannot carry cookies, so a stale or restricted jar can leave no usable
     # client at all. Try with the jar first, then once more without it.
@@ -412,7 +393,6 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
             )
 
     if _looks_blocked(last_error) and _cookie_file() is None:
-        _mark_blocked()
         raise YouTubeBlockedError(BLOCKED_HINT)
 
     raise RuntimeError(
