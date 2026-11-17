@@ -1,6 +1,10 @@
 import mimetypes
+import os
+import shutil
+import subprocess
 import time
 import logging
+from functools import lru_cache
 from pathlib import Path
 
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -89,9 +93,45 @@ logger.info("🚀 VibeFm application successfully loaded into memory!")
 app.include_router(playlist_router)
 app.include_router(rj_router)
 
+@lru_cache(maxsize=1)
+def _yt_dlp_version() -> str | None:
+    try:
+        import yt_dlp
+
+        return yt_dlp.version.__version__
+    except Exception:  # noqa: BLE001 - diagnostics must never break startup
+        return None
+
+
+@lru_cache(maxsize=1)
+def _js_runtime() -> str | None:
+    """yt-dlp needs a JS runtime (Deno) to solve YouTube's player challenge."""
+    for name in ("deno", "node"):
+        path = shutil.which(name)
+        if not path:
+            continue
+        try:
+            out = subprocess.run(
+                [path, "--version"], capture_output=True, text=True, timeout=5
+            )
+            return out.stdout.strip().splitlines()[0] or name
+        except Exception:  # noqa: BLE001 - report the binary we found anyway
+            return f"{name} (version unknown)"
+    return None
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": app.version}
+    """Liveness check plus the two things a cloud host usually gets wrong."""
+    return {
+        "status": "ok",
+        "version": app.version,
+        "yt_dlp": _yt_dlp_version(),
+        "js_runtime": _js_runtime(),
+        "cookies": bool(
+            os.environ.get("YTDLP_COOKIES") or os.environ.get("YTDLP_COOKIES_FILE")
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
