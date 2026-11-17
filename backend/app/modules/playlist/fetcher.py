@@ -328,12 +328,14 @@ def _sync_fetch_playlist(playlist_url: str) -> list[Song]:
     return songs
 
 
-def _stream_opts(clients: tuple[str, ...]) -> dict[str, Any]:
+def _stream_opts(
+    clients: tuple[str, ...], *, use_cookies: bool = True
+) -> dict[str, Any]:
     """Build yt-dlp options for one extraction attempt."""
     opts = dict(_STREAM_OPTS)
     opts["extractor_args"] = {"youtube": {"player_client": list(clients)}}
 
-    cookie_file = _cookie_file()
+    cookie_file = _cookie_file() if use_cookies else None
     if cookie_file:
         # A logged-in cookie sidesteps YouTube's datacenter bot check entirely.
         opts["cookiefile"] = cookie_file
@@ -391,13 +393,49 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
     if youtube_blocked() and _cookie_file() is None:
         raise YouTubeBlockedError(BLOCKED_HINT)
 
+    # A cookie jar is not a guaranteed win: yt-dlp skips every client that
+    # cannot carry cookies, so a stale or restricted jar can leave no usable
+    # client at all. Try with the jar first, then once more without it.
+    for use_cookies in ((True, False) if _cookie_file() else (True,)):
+        if time.monotonic() >= deadline:
+            logger.warning("Resolution budget exhausted for %s", video_id)
+            break
+        resolved, last_error = _try_client_strategies(
+            url, video_id, deadline, use_cookies=use_cookies
+        )
+        if resolved is not None:
+            return resolved
+        if use_cookies:
+            logger.info(
+                "No client streamed %s with cookies - retrying without them",
+                video_id,
+            )
+
+    if _looks_blocked(last_error) and _cookie_file() is None:
+        _mark_blocked()
+        raise YouTubeBlockedError(BLOCKED_HINT)
+
+    raise RuntimeError(
+        f"Could not extract a playable audio stream for {video_id} "
+        f"(last error: {last_error})"
+    )
+
+
+def _try_client_strategies(
+    url: str, video_id: str, deadline: float, *, use_cookies: bool
+) -> tuple[AudioStreamInfo | None, object]:
+    """Walk the client strategies once. Returns (playable stream or None, error)."""
+    last_error: object = "no client returned a playable URL"
+
     for clients in _CLIENT_STRATEGIES:
         if time.monotonic() >= deadline:
             logger.warning("Resolution budget exhausted for %s", video_id)
             break
 
         try:
-            with yt_dlp.YoutubeDL(_stream_opts(clients)) as ydl:
+            with yt_dlp.YoutubeDL(
+                _stream_opts(clients, use_cookies=use_cookies)
+            ) as ydl:
                 info = ydl.extract_info(url, download=False)
             if not info:
                 last_error = "null player response"
@@ -423,21 +461,14 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
                 ",".join(clients),
                 candidate.ext,
             )
-            return candidate
+            return candidate, last_error
 
         last_error = "URL answered 403 to playback"
         logger.warning(
             "Clients %s gave an unplayable URL for %s", ",".join(clients), video_id
         )
 
-    if _looks_blocked(last_error) and _cookie_file() is None:
-        _mark_blocked()
-        raise YouTubeBlockedError(BLOCKED_HINT)
-
-    raise RuntimeError(
-        f"Could not extract a playable audio stream for {video_id} "
-        f"(last error: {last_error})"
-    )
+    return None, last_error
 
 
 def _is_playable(info: AudioStreamInfo) -> bool:
