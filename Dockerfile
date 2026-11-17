@@ -10,7 +10,10 @@ RUN apt-get update && \
 # yt-dlp hands YouTube's player challenge to an external JavaScript runtime
 # (EJS). Deno is the only runtime it enables by default, and without one cloud
 # hosts lose formats and get "Sign in to confirm you're not a bot".
-RUN curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+# Pinned: yt-dlp requires Deno >= 2.3, and a floating tag would let a new Deno
+# release silently change streaming behaviour on the next deploy.
+ARG DENO_VERSION=2.9.8
+RUN curl -fsSL https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip \
       -o /tmp/deno.zip && \
     unzip /tmp/deno.zip -d /usr/local/bin && \
     chmod +x /usr/local/bin/deno && \
