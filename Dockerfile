@@ -3,9 +3,19 @@ FROM python:3.13-slim
 
 # Install ffmpeg, which is strictly required by yt-dlp to process and stream audio
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg curl unzip && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# yt-dlp hands YouTube's player challenge to an external JavaScript runtime
+# (EJS). Deno is the only runtime it enables by default, and without one cloud
+# hosts lose formats and get "Sign in to confirm you're not a bot".
+RUN curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+      -o /tmp/deno.zip && \
+    unzip /tmp/deno.zip -d /usr/local/bin && \
+    chmod +x /usr/local/bin/deno && \
+    rm /tmp/deno.zip && \
+    deno --version
 
 # Set the working directory inside the container
 WORKDIR /app

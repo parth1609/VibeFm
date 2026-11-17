@@ -3,5 +3,7 @@ httpx>=0.28.1
 pydantic>=2.13.3
 rich>=15.0.0
 uvicorn>=0.46.0
-yt-dlp>=2026.3.17
+# [default] pulls yt-dlp-ejs, which runs YouTube's player challenge
+# through the Deno runtime installed in the Dockerfile.
+yt-dlp[default]>=2026.10.26
 google-generativeai>=0.8.0

@@ -45,7 +45,10 @@ Playlist loading works anywhere, but YouTube answers stream requests from cloud 
 (Render, Fly, AWS, …) with *"Sign in to confirm you're not a bot"*. When that happens the
 API returns **503** with that explanation instead of silently failing.
 
-Fix it by giving the server a logged-in YouTube session:
+The image already carries the two things a cloud host needs: a current `yt-dlp` (with
+`yt-dlp-ejs`) and the **Deno** runtime it uses to solve YouTube's player challenge, plus a
+client order (`tv`, `web_embedded`) that does not need a PO token. If YouTube still
+refuses the IP, give the server a logged-in YouTube session:
 
 1. Export cookies for `youtube.com` in Netscape format (any "Get cookies.txt" browser extension).
 2. Render → your service → **Environment** → add `YTDLP_COOKIES` and paste the file contents

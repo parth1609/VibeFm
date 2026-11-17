@@ -62,14 +62,25 @@ _STREAM_OPTS: dict[str, Any] = {
 # requesting IP. Cloud hosts (Render, Fly, ...) are handled far more strictly
 # than a home connection, so try progressively simpler clients until one returns
 # a URL that really serves bytes.
+#
+# Order matters: `tv` and `web_embedded` are the clients YouTube still serves
+# without a PO token, so they are the ones that survive a datacenter IP. The
+# browser/mobile clients (`web`, `mweb`, `ios`) now need a PO token for the
+# video server request and answer 403 to the byte reads from cloud hosts.
 _CLIENT_STRATEGIES: tuple[tuple[str, ...], ...] = (
-    ("android_vr", "android", "web"),
-    ("tv", "web_safari"),
-    ("mweb", "ios"),
+    # Measured best: these two hand back a real audio-only (m4a) stream that
+    # answers 206 to the byte probe.
+    ("android_vr", "tv_samsung"),
+    # No PO token needed, so they survive cloud IPs, but they often advertise
+    # formats that then 403 on playback -- the probe below catches that.
+    ("tv", "web_embedded"),
+    ("web_safari", "mweb", "ios"),
+    # Last resort: the old browser set, usually PO-token gated now.
+    ("android", "web"),
 )
 
 # Give up on one video after this long so a dead track cannot stall the station.
-_RESOLVE_BUDGET_S = 12.0
+_RESOLVE_BUDGET_S = 20.0
 _PROBE_TIMEOUT_S = 12.0
 
 # YouTube answers datacenter IPs with "Sign in to confirm you're not a bot".
@@ -400,9 +411,9 @@ def _sync_resolve_stream(url: str) -> AudioStreamInfo:
                 ",".join(clients),
                 exc,
             )
-            if _looks_blocked(exc):
-                # The IP itself is the problem; other clients won't help.
-                break
+            # A bot check on one client says nothing about the next one: `web`
+            # refuses cloud IPs while `tv` / `web_embedded` still stream them.
+            # Keep walking the strategies and only fail once all of them refuse.
             continue
 
         if _is_playable(candidate):
