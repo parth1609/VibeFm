@@ -312,6 +312,50 @@ def _sync_fetch_playlist(playlist_url: str) -> list[Song]:
     return songs
 
 
+# Every player client yt-dlp knows about, used by the diagnostic endpoint to
+# find out which identity (if any) YouTube still streams a given video to.
+DIAGNOSTIC_CLIENTS: tuple[str, ...] = (
+    "android_vr",
+    "tv_samsung",
+    "tv",
+    "web_embedded",
+    "web_safari",
+    "mweb",
+    "ios",
+    "android",
+    "web",
+    "tv_simply",
+    "web_creator",
+    "visionos",
+    "android_music",
+    "web_music",
+)
+
+
+def probe_clients(video_id: str) -> list[dict[str, Any]]:
+    """Resolve *video_id* once per player client and report what each returns."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    results: list[dict[str, Any]] = []
+
+    for client in DIAGNOSTIC_CLIENTS:
+        entry: dict[str, Any] = {"client": client}
+        try:
+            with yt_dlp.YoutubeDL(_stream_opts((client,))) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if not info:
+                entry["error"] = "null player response"
+            else:
+                candidate = _create_stream_info(info)
+                entry["ext"] = candidate.ext
+                entry["abr"] = candidate.abr
+                entry["playable"] = _is_playable(candidate)
+        except Exception as exc:  # noqa: BLE001 - diagnostics report failures
+            entry["error"] = str(exc)[:180]
+        results.append(entry)
+
+    return results
+
+
 def _stream_opts(
     clients: tuple[str, ...], *, use_cookies: bool = True
 ) -> dict[str, Any]:

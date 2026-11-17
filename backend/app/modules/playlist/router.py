@@ -37,9 +37,10 @@ Latency strategy
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -53,6 +54,7 @@ from .fetcher import (
     fetch_playlist_songs,
     invalidate_stream,
     prefetch_audio_stream,
+    probe_clients,
     resolve_audio_stream,
 )
 from .models import AudioStreamInfo, Song
@@ -364,6 +366,18 @@ async def proxy_audio_stream(video_id: str, request: Request) -> StreamingRespon
         media_type=media_type,
         headers=response_headers,
     )
+
+
+@router.get("/diagnose/{video_id}")
+async def diagnose_video(video_id: str) -> list[dict[str, Any]]:
+    """
+    Resolve *video_id* once per YouTube player client and report the outcome.
+
+    Answers "which client still streams this video from this host?" without
+    needing the host's logs.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, probe_clients, video_id)
 
 
 @router.get("/queue", response_model=list[Song])
